@@ -12,7 +12,6 @@ Vcs-Git: https://github.com/droidian/droidcam2v4l2.git
 
 Package: droidcam2v4l2
 Architecture: any
-Depends: ${misc:Depends},
-         libyuv0
+Depends: ${misc:Depends}, ${shlibs:Depends},
 Description: Daemon that bridges Android cameras to V4L2
  using droidmedia and v4l2loopback.
