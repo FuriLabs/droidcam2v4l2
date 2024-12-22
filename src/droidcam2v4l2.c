@@ -184,19 +184,6 @@ void destroy(camera_config *config) {
     memset(config, 0, sizeof(camera_config));
 }
 
-void cleanup() {
-    static int cleaning_up = 0;
-    if (cleaning_up++) {
-        return;
-    }
-
-    printf("Cleaning up... (please don't mash Ctrl+C unless you want stuck V4L2 devices)\n");
-    for (; camera_last >= 0; --camera_last) {
-        destroy(&cameras[camera_last]);
-    }
-    exit(0);
-}
-
 size_t droid_media_camera_get_parameter_value(DroidMediaCamera *camera, const char *parameter_name, char *value_out, size_t value_len, const char *params) {
     char *original_params, *handle;
 
@@ -526,13 +513,19 @@ void stop_preview(camera_config *conf) {
 
 void *camera_event_loop(void *userdata) {
     camera_config *conf = (camera_config *) userdata;
+
+    pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+
     while (1) {
         struct v4l2_event event;
         printf("[CAMERA %d] Waiting for events...\n", conf->v4l2_idx);
         int ret = ioctl(conf->v4l2_fd, VIDIOC_DQEVENT, &event);
         if (ret < 0) {
             if (errno == EBADF) {
-                // Probably shutting down. Don't complain.
+                if (!conf->asleep) {
+                    stop_preview(conf);
+                }
                 return NULL;
             }
 
@@ -552,6 +545,58 @@ void *camera_event_loop(void *userdata) {
     }
 
     return NULL;
+}
+
+void cleanup() {
+    static volatile int cleaning_up = 0;
+    if (cleaning_up++) {
+        return;
+    }
+
+    printf("Cleaning up... (please don't mash Ctrl+C unless you want stuck V4L2 devices)\n");
+
+    // First close all v4l2 file descriptors to force threads to exit
+    for (int i = 0; i <= camera_last; i++) {
+        printf("Closing fd for camera %d (fd=%d)\n", i, cameras[i].v4l2_fd);
+        if (cameras[i].v4l2_fd > 0) {
+            close(cameras[i].v4l2_fd);
+            cameras[i].v4l2_fd = -1;
+        }
+    }
+
+    // First ensure all previews are stopped
+    for (int i = 0; i <= camera_last; i++) {
+        if (!cameras[i].asleep && cameras[i].camera) {
+            printf("Force stopping preview for camera %d\n", i);
+            stop_preview(&cameras[i]);
+        }
+    }
+
+    // Now wait for threads to exit
+    for (int i = 0; i <= camera_last; i++) {
+        if (cameras[i].thread) {
+            // First try canceling the thread
+            printf("Joining thread %lu for camera %d\n", cameras[i].thread, i);
+            pthread_cancel(cameras[i].thread);
+            // Then join it
+            pthread_join(cameras[i].thread, NULL);
+            printf("Successfully joined thread for camera %d\n", i);
+            cameras[i].thread = 0;
+        }
+    }
+
+    // Now clean up the cameras
+    for (; camera_last >= 0; --camera_last) {
+        printf("Removing V4L2 device for camera %d\n", camera_last);
+        int control_fd = open("/dev/v4l2loopback", 0);
+        if (control_fd >= 0) {
+            ioctl(control_fd, V4L2LOOPBACK_CTL_REMOVE, cameras[camera_last].v4l2_idx);
+            close(control_fd);
+        }
+        memset(&cameras[camera_last], 0, sizeof(camera_config));
+    }
+
+    exit(0);
 }
 
 int main(int argc, char *argv[]) {
@@ -585,16 +630,24 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
+    // Block signals before creating threads so they inherit the mask
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    sigaddset(&mask, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &mask, NULL);
+
     // Start the event loop for each camera.
     for (desired_camera = 0; desired_camera <= camera_last; ++desired_camera) {
         pthread_create(&cameras[desired_camera].thread, NULL, camera_event_loop, &cameras[desired_camera]);
     }
 
     atexit(cleanup);
-    signal(SIGINT, cleanup);
-    signal(SIGTERM, cleanup);
 
-    while (1) {
-        usleep(100000);
-    }
+    // Block until a signal is received
+    int sig;
+    sigwait(&mask, &sig);
+
+    cleanup();
+    return 0;
 }
