@@ -8,7 +8,7 @@ Type=simple
 Restart=on-failure
 RestartSec=5s
 ExecStartPre=/usr/bin/waitforservice init.svc.*camera*
-ExecStart=/usr/bin/droidcam2v4l2
+ExecStart=/usr/sbin/droidcam2v4l2
 
 [Install]
 WantedBy=multi-user.target
