@@ -34,6 +34,9 @@
 #define CAMERA_HEIGHT    720
 #define MAX_CAMERAS      8
 
+/* Zero-width space character as marker for our v4l2 devices */
+#define ZWSP_MARKER      "\xE2\x80\x8B"
+
 typedef struct camera_config {
     DroidMediaCamera *camera;
     int camera_idx;
@@ -65,6 +68,77 @@ DroidMediaColourFormatConstants COLOR_FORMAT_CONSTANTS;
  * risk freezing the camera HAL - because they're super well written. */
 pthread_mutex_t camera_lock = PTHREAD_MUTEX_INITIALIZER;
 
+int
+is_zwsp_marked_device(const char *device_path)
+{
+    int fd;
+    struct v4l2_capability cap;
+
+    fd = open(device_path, O_RDWR);
+    if (fd < 0)
+        return 0; /* Can't open, assume it's not ours */
+
+    if (ioctl(fd, VIDIOC_QUERYCAP, &cap) < 0) {
+        close(fd);
+        return 0; /* Can't query capabilities, assume it's not ours */
+    }
+
+    close(fd);
+
+    /* Check if the card name ends with ZWSP marker */
+    size_t cap_len = strlen((char *)cap.card);
+    size_t marker_len = strlen(ZWSP_MARKER);
+
+    if (cap_len >= marker_len) {
+        if (memcmp(&cap.card[cap_len - marker_len], ZWSP_MARKER, marker_len) == 0)
+            return 1; /* Found our marker */
+    }
+
+    return 0;
+}
+
+void
+cleanup_existing_devices(void)
+{
+    DIR *dir;
+    struct dirent *entry;
+    char device_path[32];
+    int control_fd;
+
+    g_debug("Checking for previously created devices...");
+
+    dir = opendir("/dev");
+    if (!dir) {
+        g_warning("Could not open /dev directory");
+        return;
+    }
+
+    control_fd = open(V4L2LOOPBACK_DEV, 0);
+    if (control_fd < 0) {
+        g_warning("Unable to open control device: %s", strerror(errno));
+        closedir(dir);
+        return;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "video", 5) == 0) {
+            int device_num = atoi(entry->d_name + 5);
+            snprintf(device_path, sizeof(device_path), "/dev/%s", entry->d_name);
+
+            if (is_zwsp_marked_device(device_path)) {
+                g_debug("Found our device: %s, removing...", device_path);
+                if (ioctl(control_fd, V4L2LOOPBACK_CTL_REMOVE, device_num) < 0)
+                    g_warning("Unable to remove device %d: %s", device_num, strerror(errno));
+                else
+                    g_debug("Successfully removed device %d", device_num);
+            }
+        }
+    }
+
+    close(control_fd);
+    closedir(dir);
+}
+
 camera_config*
 v4l2_setup(const char *name, int width, int height)
 {
@@ -81,17 +155,23 @@ v4l2_setup(const char *name, int width, int height)
     struct v4l2_event_subscription sub;
     uint8_t *blank;
     ssize_t blank_size, written;
+    char *marked_name = malloc(strlen(name) + strlen(ZWSP_MARKER) + 1);
+
+    /* Add ZWSP marker to the name */
+    strcpy(marked_name, name);
+    strcat(marked_name, ZWSP_MARKER);
 
     int control_fd = open(V4L2LOOPBACK_DEV, 0);
     if (control_fd < 0) {
         g_warning("Unable to open control device: %s", strerror(errno));
+        free(marked_name);
         --camera_last;
         return NULL;
     }
 
     memset(&cfg, 0, sizeof(cfg));
 
-    strncpy(cfg.card_label, name, sizeof(cfg.card_label));
+    strncpy(cfg.card_label, marked_name, sizeof(cfg.card_label));
     cfg.output_nr = -1;
     cfg.announce_all_caps = 0;
     cfg.max_width = width;
@@ -102,10 +182,12 @@ v4l2_setup(const char *name, int width, int height)
     if ((config->v4l2_idx = ioctl(control_fd, V4L2LOOPBACK_CTL_ADD, &cfg)) < 0) {
         g_warning("Unable to create device: %s", strerror(errno));
         close(control_fd);
+        free(marked_name);
         --camera_last;
         return NULL;
     }
 
+    free(marked_name);
     close(control_fd);
 
     sprintf(DEVICE_PATH, "/dev/video%d", config->v4l2_idx);
@@ -560,7 +642,7 @@ cleanup()
     if (cleaning_up++)
         return;
 
-    g_debug("Cleaning up... (please don't mash Ctrl+C unless you want stuck V4L2 devices)");
+    g_debug("Cleaning up...");
 
     /* First close all v4l2 file descriptors to force threads to exit */
     for (int i = 0; i <= camera_last; i++) {
@@ -617,6 +699,8 @@ main(int argc, char *argv[])
     droid_media_camera_constants_init(&CAMERA_CONSTANTS);
     droid_media_pixel_format_constants_init(&PIXEL_FORMAT_CONSTANTS);
     droid_media_colour_format_constants_init(&COLOR_FORMAT_CONSTANTS);
+
+    cleanup_existing_devices();
 
     camera_count = droid_media_camera_get_number_of_cameras();
     g_debug("Camera count: %d", camera_count);
