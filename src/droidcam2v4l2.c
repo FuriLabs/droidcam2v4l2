@@ -1,39 +1,35 @@
+/**
+ * SPDX-License-Identifier: MIT
+ * Copyright (C) 2025 Jesús Higueras <jesus@furilabs.com>
+ * Copyright (C) 2025 Bardia Moshiri <bardia@furilabs.com>
+ */
+
 #include <string.h>
 #include <fcntl.h>
-#include <stdint.h>
-#include <stdlib.h>
 #include <unistd.h>
 #include <stdio.h>
-#include <sys/ioctl.h>
-#include <linux/videodev2.h>
-#include "v4l2loopback.h"
-#include <droidmedia/droidmedia.h>
-#include <droidmedia/droidmediacamera.h>
-#include <droidmedia/droidmediaconstants.h>
+#include <gio/gio.h>
 #include <errno.h>
 #include <signal.h>
 #include <pthread.h>
+#include <sys/ioctl.h>
 
-#define SUPPORT_ROTATION 1
+#include <linux/videodev2.h>
+
+#include "v4l2loopback.h"
+
+#include <droidmedia/droidmedia.h>
+#include <droidmedia/droidmediacamera.h>
+#include <droidmedia/droidmediaconstants.h>
 
 #ifdef SUPPORT_ROTATION
 #include <libyuv.h>
 #include <libyuv/rotate.h>
 #endif
 
-// Why is this not in v4l2loopback.h??? Come on...
-#define V4L2LOOPBACK_EVENT_BASE (V4L2_EVENT_PRIVATE_START)
-#define V4L2LOOPBACK_EVENT_OFFSET 0x08E00000
-#define V4L2_EVENT_PRI_CLIENT_USAGE (V4L2LOOPBACK_EVENT_BASE + V4L2LOOPBACK_EVENT_OFFSET + 1)
-
-struct v4l2_event_client_usage {
-    __u32 count;
-};
-
-
-// These variables are not necessarily the exact size we'll end up getting.
-// We'll do our best to get as close as possible.
-// TODO: make these configurable.
+/* These variables are not necessarily the exact size we'll end up getting.
+ * We'll do our best to get as close as possible.
+ * TODO: make these configurable. */
 #define CAMERA_WIDTH     1280
 #define CAMERA_HEIGHT    720
 #define MAX_CAMERAS      8
@@ -48,7 +44,7 @@ typedef struct camera_config {
     int width;
     int height;
 #ifdef SUPPORT_ROTATION
-    int rotation; // must be 0, 90, 180, or 270
+    int rotation; /* must be 0, 90, 180, or 270 */
 #endif
 
     char *parameters;
@@ -64,9 +60,16 @@ DroidMediaCameraConstants CAMERA_CONSTANTS;
 DroidMediaPixelFormatConstants PIXEL_FORMAT_CONSTANTS;
 DroidMediaColourFormatConstants COLOR_FORMAT_CONSTANTS;
 
-camera_config *v4l2_setup(const char *name, int width, int height) {
+/* Only one camera can be active at a time on most devices. Ensure we don't try
+ * waking up a camera before the previous one has gone to sleep. Otherwise we
+ * risk freezing the camera HAL - because they're super well written. */
+pthread_mutex_t camera_lock = PTHREAD_MUTEX_INITIALIZER;
+
+camera_config*
+v4l2_setup(const char *name, int width, int height)
+{
     if (camera_last >= MAX_CAMERAS) {
-        printf("Too many cameras. What are you even running this on?\n");
+        g_warning("Too many cameras. What are you even running this on?");
         return NULL;
     }
 
@@ -79,9 +82,9 @@ camera_config *v4l2_setup(const char *name, int width, int height) {
     uint8_t *blank;
     ssize_t blank_size, written;
 
-    int control_fd = open("/dev/v4l2loopback", 0);
+    int control_fd = open(V4L2LOOPBACK_DEV, 0);
     if (control_fd < 0) {
-        printf("Unable to open control device: %s\n", strerror(errno));
+        g_warning("Unable to open control device: %s", strerror(errno));
         --camera_last;
         return NULL;
     }
@@ -97,7 +100,7 @@ camera_config *v4l2_setup(const char *name, int width, int height) {
     cfg.max_openers = 32;
 
     if ((config->v4l2_idx = ioctl(control_fd, V4L2LOOPBACK_CTL_ADD, &cfg)) < 0) {
-        printf("Unable to create device: %s\n", strerror(errno));
+        g_warning("Unable to create device: %s", strerror(errno));
         close(control_fd);
         --camera_last;
         return NULL;
@@ -106,11 +109,11 @@ camera_config *v4l2_setup(const char *name, int width, int height) {
     close(control_fd);
 
     sprintf(DEVICE_PATH, "/dev/video%d", config->v4l2_idx);
-    printf("Created device: %s\n", DEVICE_PATH);
+    g_debug("Created device: %s", DEVICE_PATH);
 
     config->v4l2_fd = open(DEVICE_PATH, O_WRONLY);
     if (config->v4l2_fd < 0) {
-        printf("Unable to open device: %s\n", strerror(errno));
+        g_warning("Unable to open device: %s", strerror(errno));
         goto fail;
     }
 
@@ -122,18 +125,18 @@ camera_config *v4l2_setup(const char *name, int width, int height) {
     fmt.fmt.pix.field = V4L2_FIELD_NONE;
 
     if (ioctl(config->v4l2_fd, VIDIOC_S_FMT, &fmt) < 0) {
-        printf("Failed to set pixel format: %s\n", strerror(errno));
-        goto fail; // I've always wanted a "goto fail" of my own. h/t Apple :)
+        g_warning("Failed to set pixel format: %s", strerror(errno));
+        goto fail; /* I've always wanted a "goto fail" of my own. h/t Apple :) */
     }
 
     memset(&sub, 0, sizeof(sub));
     sub.type = V4L2_EVENT_PRI_CLIENT_USAGE;
     if (ioctl(config->v4l2_fd, VIDIOC_SUBSCRIBE_EVENT, &sub) < 0) {
-        printf("Failed to subscribe to events: %s\n", strerror(errno));
+        g_warning("Failed to subscribe to events: %s", strerror(errno));
         goto fail;
     }
 
-    // Emit one blank frame to configure the device.
+    /* Emit one blank frame to configure the device. */
     blank_size = width * height * 3 / 2;
     blank = malloc(blank_size);
     memset(blank, 47, blank_size);
@@ -141,7 +144,7 @@ camera_config *v4l2_setup(const char *name, int width, int height) {
     free(blank);
 
     if (written < blank_size) {
-        printf("Error writing to v4l2 device: %s\n", strerror(errno));
+        g_warning("Error writing to v4l2 device: %s", strerror(errno));
         goto fail;
     }
 
@@ -156,8 +159,10 @@ fail:
     return NULL;
 }
 
-void destroy(camera_config *config) {
-    close(config->v4l2_fd);  // Forces the thread to exit.
+void
+destroy(camera_config *config)
+{
+    close(config->v4l2_fd); /* Forces the thread to exit. */
 
     if (config->thread) {
         pthread_kill(config->thread, SIGINT);
@@ -170,28 +175,29 @@ void destroy(camera_config *config) {
         droid_media_camera_disconnect(config->camera);
     }
 
-    int control_fd = open("/dev/v4l2loopback", 0);
+    int control_fd = open(V4L2LOOPBACK_DEV, 0);
     if (control_fd < 0) {
-        printf("Unable to open control device: %s\n", strerror(errno));
+        g_warning("Unable to open control device: %s", strerror(errno));
         return;
     }
 
-    if (ioctl(control_fd, V4L2LOOPBACK_CTL_REMOVE, config->v4l2_idx) < 0) {
-        printf("Unable to remove device %d: %s\n", config->v4l2_idx, strerror(errno));
-    }
+    if (ioctl(control_fd, V4L2LOOPBACK_CTL_REMOVE, config->v4l2_idx) < 0)
+        g_warning("Unable to remove device %d: %s", config->v4l2_idx, strerror(errno));
 
     close(control_fd);
     memset(config, 0, sizeof(camera_config));
 }
 
-size_t droid_media_camera_get_parameter_value(DroidMediaCamera *camera, const char *parameter_name, char *value_out, size_t value_len, const char *params) {
+size_t
+droid_media_camera_get_parameter_value(DroidMediaCamera *camera, const char *parameter_name, char *value_out, size_t value_len, const char *params)
+{
     char *original_params, *handle;
 
-    if (params) {
+    if (params)
         original_params = strdup(params);
-    } else {
+    else
         original_params = strdup(droid_media_camera_get_parameters(camera));
-    }
+
     handle = original_params;
 
     while (original_params && *original_params) {
@@ -208,9 +214,7 @@ size_t droid_media_camera_get_parameter_value(DroidMediaCamera *camera, const ch
 
         if (strcmp(key, parameter_name) == 0) {
             if (value_out && value_len)
-            {
                 strncpy(value_out, value, value_len);
-            }
             free(handle);
             return strlen(value);
         }
@@ -220,7 +224,9 @@ size_t droid_media_camera_get_parameter_value(DroidMediaCamera *camera, const ch
     return 0;
 }
 
-bool droid_media_camera_add_parameters(DroidMediaCamera *camera, const char *params) {
+bool
+droid_media_camera_add_parameters(DroidMediaCamera *camera, const char *params)
+{
     char *original_params = strdup(droid_media_camera_get_parameters(camera));
     char *handle = original_params;
 
@@ -261,8 +267,9 @@ bool droid_media_camera_add_parameters(DroidMediaCamera *camera, const char *par
 }
 
 #ifdef SUPPORT_ROTATION
-
-void rotate_yuv420p(const void *src_y, const void *src_u, const void *src_v, void *dst_y, void *dst_u, void *dst_v, int src_width, int src_height, int rotation) {
+void
+rotate_yuv420p(const void *src_y, const void *src_u, const void *src_v, void *dst_y, void *dst_u, void *dst_v, int src_width, int src_height, int rotation)
+{
     enum RotationMode mode;
     int dst_width = src_width;
     int dst_height = src_height;
@@ -286,44 +293,48 @@ void rotate_yuv420p(const void *src_y, const void *src_u, const void *src_v, voi
     }
 
     I420Rotate((const uint8_t *)src_y, src_width,
-            (const uint8_t *)src_u, src_width / 2,
-            (const uint8_t *)src_v, src_width / 2,
-            (uint8_t *)dst_y, dst_width,
-            (uint8_t *)dst_u, dst_width / 2,
-            (uint8_t *)dst_v, dst_width / 2,
-            dst_height, dst_width, mode);
+               (const uint8_t *)src_u, src_width / 2,
+               (const uint8_t *)src_v, src_width / 2,
+               (uint8_t *)dst_y, dst_width,
+               (uint8_t *)dst_u, dst_width / 2,
+               (uint8_t *)dst_v, dst_width / 2,
+               dst_height, dst_width, mode);
 }
 #endif
 
-void preview_frame_callback(void *userdata, DroidMediaData *data) {
+void
+preview_frame_callback(void *userdata, DroidMediaData *data)
+{
     ssize_t written = 0;
     struct camera_config *cfg = (struct camera_config *) userdata;
     ssize_t y_size = cfg->width * cfg->height;
     ssize_t uv_size = cfg->width * cfg->height / 4;
 
-    // Sadly can't write() three times; v4l2loopback doesn't support it.
-    // Create a crappy intermediate buffer. :(
-    // Caveat emptor: if you decide to allow multiple cameras, this will
-    // need to be per-camera. It is not thread-safe.
+    /* Sadly can't write() three times; v4l2loopback doesn't support it.
+     * Create a crappy intermediate buffer. :(
+     * Caveat emptor: if you decide to allow multiple cameras, this will
+     * need to be per-camera. It is not thread-safe. */
     static size_t last_intermediate_size = 0;
     static uint8_t *intermediate = NULL;
 
     if (y_size + uv_size * 2 > last_intermediate_size) {
-        if (intermediate) {
+        if (intermediate)
             free(intermediate);
-        }
         intermediate = malloc(y_size + uv_size * 2);
         last_intermediate_size = y_size + uv_size * 2;
     }
 
+    /* we need to pump focus every frame to keep it focused on movement */
+    droid_media_camera_start_auto_focus(cfg->camera);
+
 #ifdef SUPPORT_ROTATION
-    // Intermediate buffer ends up giving us a nice chance to rotate the image.
-    rotate_yuv420p(data->data,                      // Source Y
-                   data->data + y_size,             // Source U
-                   data->data + y_size + uv_size,   // Source V
-                   intermediate,                    // Destination Y
-                   intermediate + y_size + uv_size, // Destination U (swapped!)
-                   intermediate + y_size,           // Destination V (swapped!)
+    /* Intermediate buffer ends up giving us a nice chance to rotate the image. */
+    rotate_yuv420p(data->data,                      /* Source Y */
+                   data->data + y_size,             /* Source U */
+                   data->data + y_size + uv_size,   /* Source V */
+                   intermediate,                    /* Destination Y */
+                   intermediate + y_size + uv_size, /* Destination U (swapped!) */
+                   intermediate + y_size,           /* Destination V (swapped!) */
                    cfg->width, cfg->height, cfg->rotation);
 #else
     memcpy(intermediate, data->data, y_size);
@@ -332,12 +343,13 @@ void preview_frame_callback(void *userdata, DroidMediaData *data) {
 #endif
 
     written = write(cfg->v4l2_fd, intermediate, y_size + uv_size * 2);
-    if (written < 0) {
-        printf("Error writing to v4l2 device: %s\n", strerror(errno));
-    }
+    if (written < 0)
+        g_warning("Error writing to v4l2 device: %s", strerror(errno));
 }
 
-camera_config *init_camera(int index, int desired_width, int desired_height) {
+camera_config*
+init_camera(int index, int desired_width, int desired_height)
+{
     DroidMediaCamera *camera;
     DroidMediaCameraInfo info;
     camera_config *conf;
@@ -349,43 +361,40 @@ camera_config *init_camera(int index, int desired_width, int desired_height) {
 
     camera = droid_media_camera_connect(index);
     if (!camera) {
-        printf("Failed to connect to camera %d.\n", index);
+        g_warning("Failed to connect to camera %d.", index);
         return NULL;
     }
 
     droid_media_camera_get_info(&info, index);
 
-    // Give it a name. It would probably be better to either allow the user
-    // to set their own names, or try to figure out which is telephoto, wide, etc...
-    // Right now, you get to deal with the numbers.
+    /* Give it a name. It would probably be better to either allow the user
+     * to set their own names, or try to figure out which is telephoto, wide, etc...
+     * Right now, you get to deal with the numbers. */
     if (info.facing == DROID_MEDIA_CAMERA_FACING_FRONT) {
         static int front_camera_count = 0;
-        if (front_camera_count++ == 0) {
+        if (front_camera_count++ == 0)
             sprintf(name_buffer, "Front Camera");
-        } else {
+        else
             sprintf(name_buffer, "Front Camera %d", front_camera_count);
-        }
     } else {
         static int back_camera_count = 0;
-        if (back_camera_count++ == 0) {
+        if (back_camera_count++ == 0)
             sprintf(name_buffer, "Back Camera");
-        } else {
+        else
             sprintf(name_buffer, "Back Camera %d", back_camera_count);
-        }
     }
 
-    // Figure out a preview size that's somewhat close to what we want.
+    /* Figure out a preview size that's somewhat close to what we want. */
     if (!droid_media_camera_get_parameter_value(camera, "preview-size-values", parameter_buffer, sizeof(parameter_buffer), NULL)) {
-        printf("[CAMERA %d] Failed to get preview size values.\n", index);
+        g_warning("[CAMERA %d] Failed to get preview size values.", index);
         return NULL;
     }
 
     char *needle = parameter_buffer;
     while (needle && *needle) {
         char *x = strchr(needle, 'x');
-        if (!x) {
+        if (!x)
             break;
-        }
         *x = '\0';
         x++;
         int w = atoi(needle);
@@ -402,21 +411,20 @@ camera_config *init_camera(int index, int desired_width, int desired_height) {
             height = h;
         }
         needle = strchr(x, ',');
-        if (needle) {
+        if (needle)
             needle++;
-        }
     }
 
     if (width <= 0 || height <= 0) {
-        printf("[CAMERA %d] Failed to find a suitable preview size.\n", index);
+        g_warning("[CAMERA %d] Failed to find a suitable preview size.", index);
         return NULL;
     }
 
-    // TODO: not all devices necessarily support yuv420p or 30 FPS. Be smarter about this.
+    /* everything we get from droidmedia supports yuv420p. hardcoding this should be safe */
     sprintf(parameter_buffer, "preview-size=%dx%d;preview-frame-rate=30;preview-format=yuv420p;", width, height);
 
-    // OK, close the camera to give direct consumers a chance (and to let the camera HAL sleep)
-    // It will be reopened on demand.
+    /* OK, close the camera to give direct consumers a chance (and to let the camera HAL sleep)
+     * It will be reopened on demand. */
     droid_media_camera_disconnect(camera);
 
 #ifdef SUPPORT_ROTATION
@@ -424,11 +432,11 @@ camera_config *init_camera(int index, int desired_width, int desired_height) {
         conf = v4l2_setup(name_buffer, height, width);
 
         if (!conf) {
-            printf("[CAMERA %d] Failed to set up v4l2 device.\n", index);
+            g_warning("[CAMERA %d] Failed to set up v4l2 device.", index);
             return NULL;
         }
 
-        // Ensure width and height are the original values.
+        /* Ensure width and height are the original values. */
         conf->width = width;
         conf->height = height;
     } else {
@@ -440,7 +448,7 @@ camera_config *init_camera(int index, int desired_width, int desired_height) {
 #endif
 
     if (!conf) {
-        printf("[CAMERA %d] Failed to set up v4l2 device.\n", index);
+        g_warning("[CAMERA %d] Failed to set up v4l2 device.", index);
         return NULL;
     }
 
@@ -451,33 +459,30 @@ camera_config *init_camera(int index, int desired_width, int desired_height) {
     return conf;
 }
 
-// Only one camera can be active at a time on most devices. Ensure we don't try
-// waking up a camera before the previous one has gone to sleep. Otherwise we
-// risk freezing the camera HAL - because they're super well written.
-pthread_mutex_t camera_lock = PTHREAD_MUTEX_INITIALIZER;
-
-bool start_preview(camera_config *conf) {
+bool
+start_preview(camera_config *conf)
+{
     DroidMediaCameraCallbacks callbacks;
 
-    printf("[CAMERA %d] Wakey wakey, hands off snakey.\n", conf->v4l2_idx);
+    g_debug("[CAMERA %d] Wakey wakey, hands off snakey.", conf->v4l2_idx);
     pthread_mutex_lock(&camera_lock);
-    printf("[CAMERA %d] Got lock.\n", conf->v4l2_idx);
+    g_debug("[CAMERA %d] Got lock.", conf->v4l2_idx);
 
     conf->camera = droid_media_camera_connect(conf->camera_idx);
     if (!conf->camera) {
-        printf("[CAMERA %d] Failed to reconnect to camera.\n", conf->v4l2_idx);
+        g_warning("[CAMERA %d] Failed to reconnect to camera.", conf->v4l2_idx);
         pthread_mutex_unlock(&camera_lock);
         return false;
     }
 
     if (!droid_media_camera_lock(conf->camera)) {
-        printf("[CAMERA %d] Failed to lock camera.\n", conf->v4l2_idx);
+        g_warning("[CAMERA %d] Failed to lock camera.", conf->v4l2_idx);
         pthread_mutex_unlock(&camera_lock);
         return false;
     }
 
     if (!droid_media_camera_add_parameters(conf->camera, conf->parameters)) {
-        printf("[CAMERA %d] Failed to add parameters.\n", conf->v4l2_idx);
+        g_warning("[CAMERA %d] Failed to add parameters.", conf->v4l2_idx);
         pthread_mutex_unlock(&camera_lock);
         return false;
     }
@@ -488,11 +493,10 @@ bool start_preview(camera_config *conf) {
     callbacks.preview_frame_cb = preview_frame_callback;
     droid_media_camera_set_callbacks(conf->camera, &callbacks, conf);
 
-    // TODO: make configurable. I just really want it to focus.
     droid_media_camera_start_auto_focus(conf->camera);
 
     if (!droid_media_camera_start_preview(conf->camera)) {
-        printf("[CAMERA %d] Failed to start preview.\n", conf->v4l2_idx);
+        g_warning("[CAMERA %d] Failed to start preview.", conf->v4l2_idx);
         pthread_mutex_unlock(&camera_lock);
         return false;
     }
@@ -501,8 +505,10 @@ bool start_preview(camera_config *conf) {
     return true;
 }
 
-void stop_preview(camera_config *conf) {
-    printf("[CAMERA %d] Sleep time!\n", conf->v4l2_idx);
+void
+stop_preview(camera_config *conf)
+{
+    g_debug("[CAMERA %d] Sleep time!", conf->v4l2_idx);
     droid_media_camera_stop_preview(conf->camera);
     droid_media_camera_unlock(conf->camera);
     droid_media_camera_disconnect(conf->camera);
@@ -511,7 +517,9 @@ void stop_preview(camera_config *conf) {
     pthread_mutex_unlock(&camera_lock);
 }
 
-void *camera_event_loop(void *userdata) {
+void*
+camera_event_loop(void *userdata)
+{
     camera_config *conf = (camera_config *) userdata;
 
     pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
@@ -519,76 +527,75 @@ void *camera_event_loop(void *userdata) {
 
     while (1) {
         struct v4l2_event event;
-        printf("[CAMERA %d] Waiting for events...\n", conf->v4l2_idx);
+        g_debug("[CAMERA %d] Waiting for events...", conf->v4l2_idx);
         int ret = ioctl(conf->v4l2_fd, VIDIOC_DQEVENT, &event);
         if (ret < 0) {
             if (errno == EBADF) {
-                if (!conf->asleep) {
+                if (!conf->asleep)
                     stop_preview(conf);
-                }
                 return NULL;
             }
 
-            printf("[CAMERA %d] Failed to get event: %s\n", conf->v4l2_idx, strerror(errno));
+            g_warning("[CAMERA %d] Failed to get event: %s", conf->v4l2_idx, strerror(errno));
             return NULL;
         }
 
         if (event.type == V4L2_EVENT_PRI_CLIENT_USAGE) {
             struct v4l2_event_client_usage *usage = (struct v4l2_event_client_usage *) event.u.data;
-            printf("[CAMERA %d] Consumers: %d\n", conf->v4l2_idx, usage->count);
-            if (usage->count > 0 && conf->asleep) {
+            g_debug("[CAMERA %d] Consumers: %d", conf->v4l2_idx, usage->count);
+            if (usage->count > 0 && conf->asleep)
                 start_preview(conf);
-            } else if (usage->count == 0 && !conf->asleep) {
+            else if (usage->count == 0 && !conf->asleep)
                 stop_preview(conf);
-            }
         }
     }
 
     return NULL;
 }
 
-void cleanup() {
+void
+cleanup()
+{
     static volatile int cleaning_up = 0;
-    if (cleaning_up++) {
+    if (cleaning_up++)
         return;
-    }
 
-    printf("Cleaning up... (please don't mash Ctrl+C unless you want stuck V4L2 devices)\n");
+    g_debug("Cleaning up... (please don't mash Ctrl+C unless you want stuck V4L2 devices)");
 
-    // First close all v4l2 file descriptors to force threads to exit
+    /* First close all v4l2 file descriptors to force threads to exit */
     for (int i = 0; i <= camera_last; i++) {
-        printf("Closing fd for camera %d (fd=%d)\n", i, cameras[i].v4l2_fd);
+        g_debug("Closing fd for camera %d (fd=%d)", i, cameras[i].v4l2_fd);
         if (cameras[i].v4l2_fd > 0) {
             close(cameras[i].v4l2_fd);
             cameras[i].v4l2_fd = -1;
         }
     }
 
-    // First ensure all previews are stopped
+    /* First ensure all previews are stopped */
     for (int i = 0; i <= camera_last; i++) {
         if (!cameras[i].asleep && cameras[i].camera) {
-            printf("Force stopping preview for camera %d\n", i);
+            g_debug("Force stopping preview for camera %d", i);
             stop_preview(&cameras[i]);
         }
     }
 
-    // Now wait for threads to exit
+    /* Now wait for threads to exit */
     for (int i = 0; i <= camera_last; i++) {
         if (cameras[i].thread) {
-            // First try canceling the thread
-            printf("Joining thread %lu for camera %d\n", cameras[i].thread, i);
+            /* First try canceling the thread */
+            g_debug("Joining thread %lu for camera %d", cameras[i].thread, i);
             pthread_cancel(cameras[i].thread);
-            // Then join it
+            /* Then join it */
             pthread_join(cameras[i].thread, NULL);
-            printf("Successfully joined thread for camera %d\n", i);
+            g_debug("Successfully joined thread for camera %d", i);
             cameras[i].thread = 0;
         }
     }
 
-    // Now clean up the cameras
+    /* Now clean up the cameras */
     for (; camera_last >= 0; --camera_last) {
-        printf("Removing V4L2 device for camera %d\n", camera_last);
-        int control_fd = open("/dev/v4l2loopback", 0);
+        g_debug("Removing V4L2 device for camera %d", camera_last);
+        int control_fd = open(V4L2LOOPBACK_DEV, 0);
         if (control_fd >= 0) {
             ioctl(control_fd, V4L2LOOPBACK_CTL_REMOVE, cameras[camera_last].v4l2_idx);
             close(control_fd);
@@ -599,7 +606,9 @@ void cleanup() {
     exit(0);
 }
 
-int main(int argc, char *argv[]) {
+int
+main(int argc, char *argv[])
+{
     camera_config *conf;
     int camera_count = 0;
     int desired_camera;
@@ -610,41 +619,40 @@ int main(int argc, char *argv[]) {
     droid_media_colour_format_constants_init(&COLOR_FORMAT_CONSTANTS);
 
     camera_count = droid_media_camera_get_number_of_cameras();
-    printf("Camera count: %d\n", camera_count);
+    g_debug("Camera count: %d", camera_count);
 
     if (camera_count < 1) {
-        printf("No cameras found.\n");
+        g_warning("No cameras found.");
         return -1;
     }
 
     for (desired_camera = 0; desired_camera < camera_count; ++desired_camera) {
-        printf("Trying camera %d...\n", desired_camera);
+        g_debug("Trying camera %d...", desired_camera);
         conf = init_camera(desired_camera, CAMERA_WIDTH, CAMERA_HEIGHT);
-        if (!conf) {
-            printf("Failed to init camera.\n");
-        }
+        if (!conf)
+            g_warning("Failed to init camera.");
     }
 
     if (camera_last < 0) {
-        printf("No cameras initialized.\n");
+        g_warning("No cameras initialized.");
         return -1;
     }
 
-    // Block signals before creating threads so they inherit the mask
+    /* Block signals before creating threads so they inherit the mask */
     sigset_t mask;
     sigemptyset(&mask);
     sigaddset(&mask, SIGINT);
     sigaddset(&mask, SIGTERM);
     pthread_sigmask(SIG_BLOCK, &mask, NULL);
 
-    // Start the event loop for each camera.
+    /* Start the event loop for each camera. */
     for (desired_camera = 0; desired_camera <= camera_last; ++desired_camera) {
         pthread_create(&cameras[desired_camera].thread, NULL, camera_event_loop, &cameras[desired_camera]);
     }
 
     atexit(cleanup);
 
-    // Block until a signal is received
+    /* Block until a signal is received */
     int sig;
     sigwait(&mask, &sig);
 

@@ -1,13 +1,13 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: droidcam2v4l2
-Source: https://github.com/droidian/droidcam2v4l2
+Source: https://github.com/furilabs/droidcam2v4l2
 
 Files: *
-Copyright: 2024 Jesús Higueras <jesus@dabbleam.com>
+Copyright: 2025 Jesús Higueras <jesus@dabbleam.com>
 License: MIT
 
 Files: debian/*
-Copyright: 2024 Bardia Moshiri <fakeshell@bardia.tech>
+Copyright: 2025 Bardia Moshiri <fakeshell@bardia.tech>
 License: BSD-3-clause
 
 License: BSD-3-clause

@@ -14,6 +14,16 @@
 #define V4L2LOOPBACK_VERSION_MINOR 12
 #define V4L2LOOPBACK_VERSION_BUGFIX 7
 
+#define V4L2LOOPBACK_EVENT_BASE (V4L2_EVENT_PRIVATE_START)
+#define V4L2LOOPBACK_EVENT_OFFSET 0x08E00000
+#define V4L2_EVENT_PRI_CLIENT_USAGE (V4L2LOOPBACK_EVENT_BASE + V4L2LOOPBACK_EVENT_OFFSET + 1)
+
+#define V4L2LOOPBACK_DEV "/dev/v4l2loopback"
+
+struct v4l2_event_client_usage {
+    __u32 count;
+};
+
 /* /dev/v4l2loopback interface */
 
 struct v4l2_loopback_config {
