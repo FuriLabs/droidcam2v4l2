@@ -4,6 +4,7 @@ Source: https://github.com/furilabs/droidcam2v4l2
 
 Files: *
 Copyright: 2025 Jesús Higueras <jesus@dabbleam.com>
+           2025 Bardia Moshiri <fakeshell@bardia.tech>
 License: MIT
 
 Files: debian/*
