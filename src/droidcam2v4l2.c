@@ -241,35 +241,6 @@ fail:
     return NULL;
 }
 
-void
-destroy(camera_config *config)
-{
-    close(config->v4l2_fd); /* Forces the thread to exit. */
-
-    if (config->thread) {
-        pthread_kill(config->thread, SIGINT);
-        pthread_join(config->thread, NULL);
-    }
-
-    if (config->camera) {
-        droid_media_camera_stop_preview(config->camera);
-        droid_media_camera_unlock(config->camera);
-        droid_media_camera_disconnect(config->camera);
-    }
-
-    int control_fd = open(V4L2LOOPBACK_DEV, 0);
-    if (control_fd < 0) {
-        g_warning("Unable to open control device: %s", strerror(errno));
-        return;
-    }
-
-    if (ioctl(control_fd, V4L2LOOPBACK_CTL_REMOVE, config->v4l2_idx) < 0)
-        g_warning("Unable to remove device %d: %s", config->v4l2_idx, strerror(errno));
-
-    close(control_fd);
-    memset(config, 0, sizeof(camera_config));
-}
-
 size_t
 droid_media_camera_get_parameter_value(DroidMediaCamera *camera, const char *parameter_name, char *value_out, size_t value_len, const char *params)
 {
@@ -653,7 +624,7 @@ cleanup()
         }
     }
 
-    /* First ensure all previews are stopped */
+    /* Ensure all previews are stopped */
     for (int i = 0; i <= camera_last; i++) {
         if (!cameras[i].asleep && cameras[i].camera) {
             g_debug("Force stopping preview for camera %d", i);
@@ -676,12 +647,22 @@ cleanup()
 
     /* Now clean up the cameras */
     for (; camera_last >= 0; --camera_last) {
-        g_debug("Removing V4L2 device for camera %d", camera_last);
+        g_debug("Cleaning up camera %d", camera_last);
+
+        if (cameras[camera_last].parameters) {
+            free(cameras[camera_last].parameters);
+            cameras[camera_last].parameters = NULL;
+        }
+
+        /* Remove V4L2 device */
         int control_fd = open(V4L2LOOPBACK_DEV, 0);
         if (control_fd >= 0) {
-            ioctl(control_fd, V4L2LOOPBACK_CTL_REMOVE, cameras[camera_last].v4l2_idx);
+            g_debug("Removing V4L2 device for camera %d", camera_last);
+            if (ioctl(control_fd, V4L2LOOPBACK_CTL_REMOVE, cameras[camera_last].v4l2_idx) < 0)
+                g_warning("Unable to remove device %d: %s", cameras[camera_last].v4l2_idx, strerror(errno));
             close(control_fd);
         }
+
         memset(&cameras[camera_last], 0, sizeof(camera_config));
     }
 
