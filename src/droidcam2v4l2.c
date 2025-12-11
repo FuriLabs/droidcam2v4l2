@@ -22,6 +22,8 @@
 #include <droidmedia/droidmediacamera.h>
 #include <droidmedia/droidmediaconstants.h>
 
+#include <hybris/properties/properties.h>
+
 #ifdef SUPPORT_ROTATION
 #include <libyuv.h>
 #include <libyuv/rotate.h>
@@ -675,6 +677,19 @@ main(int argc, char *argv[])
     camera_config *conf;
     int camera_count = 0;
     int desired_camera;
+    char service_state[PROP_VALUE_MAX];
+
+    while (1) {
+        g_debug("waiting for camerahalserver to start...");
+        property_get("init.svc.camerahalserver", service_state, "");
+
+        if (strcmp(service_state, "running") == 0) {
+            g_debug("camerahalserver is running");
+            break;
+        }
+
+        sleep(5);
+    }
 
     droid_media_init();
     droid_media_camera_constants_init(&CAMERA_CONSTANTS);
