@@ -13,6 +13,8 @@
 #include <signal.h>
 #include <pthread.h>
 #include <sys/ioctl.h>
+#include <sys/inotify.h>
+#include <sys/stat.h>
 
 #include <linux/videodev2.h>
 
@@ -655,6 +657,66 @@ cleanup()
     exit(0);
 }
 
+static int
+wait_for_v4l2loopback_dev(void)
+{
+    struct stat st;
+
+    if (stat(V4L2LOOPBACK_DEV, &st) == 0)
+        return 0;
+
+    int fd = inotify_init1(IN_CLOEXEC);
+    if (fd < 0) {
+        g_warning("inotify_init1 failed: %s", strerror(errno));
+        return -1;
+    }
+
+    if (inotify_add_watch(fd, "/dev", IN_CREATE | IN_MOVED_TO) < 0) {
+        g_warning("inotify_add_watch(/dev) failed: %s", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    g_debug("Waiting for %s to appear...", V4L2LOOPBACK_DEV);
+
+    for (;;) {
+        /* not sure I quite understand this. in what case can this actually fail?
+         * leaving it here for the sake of completeness
+         *
+         * https://github.com/mkerrisk/man-pages/blob/master/man7/inotify.7#L943
+         */
+        char buf[4096]
+            __attribute__((aligned(__alignof__(struct inotify_event))));
+
+        ssize_t len = read(fd, buf, sizeof(buf));
+        if (len < 0) {
+            if (errno == EINTR)
+                continue;
+
+            g_warning("inotify read failed: %s", strerror(errno));
+            close(fd);
+            return -1;
+        }
+
+        for (char *ptr = buf; ptr < buf + len;) {
+            struct inotify_event *event = (struct inotify_event *)ptr;
+
+            if (event->len > 0 &&
+                strcmp(event->name, "v4l2loopback") == 0) {
+                close(fd);
+                return 0;
+            }
+
+            ptr += sizeof(struct inotify_event) + event->len;
+        }
+
+        if (stat(V4L2LOOPBACK_DEV, &st) == 0) {
+            close(fd);
+            return 0;
+        }
+    }
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -674,6 +736,9 @@ main(int argc, char *argv[])
 
         sleep(5);
     }
+
+    if (wait_for_v4l2loopback_dev() < 0)
+        return -1;
 
     droid_media_init();
     droid_media_camera_constants_init(&CAMERA_CONSTANTS);
