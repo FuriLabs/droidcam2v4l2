@@ -1,7 +1,6 @@
 [Unit]
 Description=droidmedia to v4l2
 After=lxc@android.service
-ConditionPathExists=/dev/v4l2loopback
 
 [Service]
 Type=simple
