@@ -1,6 +1,6 @@
 CC = gcc
 
-CFLAGS = `pkg-config --cflags gio-2.0` -DSUPPORT_ROTATION=1
+CFLAGS = `pkg-config --cflags gio-2.0`
 LDFLAGS = `pkg-config --libs gio-2.0 libandroid-properties` -ldroidmedia -lyuv
 
 SOURCES = src/droidcam2v4l2.c

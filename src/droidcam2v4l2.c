@@ -24,10 +24,8 @@
 
 #include <hybris/properties/properties.h>
 
-#ifdef SUPPORT_ROTATION
 #include <libyuv.h>
 #include <libyuv/rotate.h>
-#endif
 
 /* These variables are not necessarily the exact size we'll end up getting.
  * We'll do our best to get as close as possible.
@@ -48,9 +46,7 @@ typedef struct camera_config {
 
     int width;
     int height;
-#ifdef SUPPORT_ROTATION
     int rotation; /* must be 0, 90, 180, or 270 */
-#endif
 
     char *parameters;
 
@@ -321,7 +317,6 @@ droid_media_camera_add_parameters(DroidMediaCamera *camera, const char *params)
     return ret;
 }
 
-#ifdef SUPPORT_ROTATION
 void
 rotate_yuv420p(const void *src_y, const void *src_u, const void *src_v, void *dst_y, void *dst_u, void *dst_v, int src_width, int src_height, int rotation)
 {
@@ -355,7 +350,6 @@ rotate_yuv420p(const void *src_y, const void *src_u, const void *src_v, void *ds
                (uint8_t *)dst_v, dst_width / 2,
                dst_height, dst_width, mode);
 }
-#endif
 
 void
 preview_frame_callback(void *userdata, DroidMediaData *data)
@@ -382,7 +376,6 @@ preview_frame_callback(void *userdata, DroidMediaData *data)
     /* we need to pump focus every frame to keep it focused on movement */
     droid_media_camera_start_auto_focus(cfg->camera);
 
-#ifdef SUPPORT_ROTATION
     /* Intermediate buffer ends up giving us a nice chance to rotate the image. */
     rotate_yuv420p(data->data,                      /* Source Y */
                    data->data + y_size,             /* Source U */
@@ -391,11 +384,6 @@ preview_frame_callback(void *userdata, DroidMediaData *data)
                    intermediate + y_size + uv_size, /* Destination U (swapped!) */
                    intermediate + y_size,           /* Destination V (swapped!) */
                    cfg->width, cfg->height, cfg->rotation);
-#else
-    memcpy(intermediate, data->data, y_size);
-    memcpy(intermediate + y_size, data->data + y_size + uv_size, uv_size);
-    memcpy(intermediate + y_size + uv_size, data->data + y_size, uv_size);
-#endif
 
     written = write(cfg->v4l2_fd, intermediate, y_size + uv_size * 2);
     if (written < 0)
@@ -482,7 +470,6 @@ init_camera(int index, int desired_width, int desired_height)
      * It will be reopened on demand. */
     droid_media_camera_disconnect(camera);
 
-#ifdef SUPPORT_ROTATION
     if (info.orientation == 90 || info.orientation == 270) {
         conf = v4l2_setup(name_buffer, height, width);
 
@@ -498,9 +485,6 @@ init_camera(int index, int desired_width, int desired_height)
         conf = v4l2_setup(name_buffer, width, height);
     }
     conf->rotation = info.orientation;
-#else
-    conf = v4l2_setup(name_buffer, width, height);
-#endif
 
     if (!conf) {
         g_warning("[CAMERA %d] Failed to set up v4l2 device.", index);
