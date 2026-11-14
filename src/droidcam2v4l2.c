@@ -28,6 +28,7 @@
 
 #include <libyuv.h>
 #include <libyuv/rotate.h>
+#include <libyuv/convert.h>
 
 /* These variables are not necessarily the exact size we'll end up getting.
  * We'll do our best to get as close as possible.
@@ -54,6 +55,8 @@ typedef struct camera_config {
 
     bool asleep;
     pthread_t thread;
+
+    bool nv21; /* the camera only offers yuv420sp previews */
 } camera_config;
 
 camera_config cameras[MAX_CAMERAS];
@@ -386,10 +389,34 @@ preview_frame_callback(void *userdata, DroidMediaData *data)
     /* we need to pump focus every frame to keep it focused on movement */
     droid_media_camera_start_auto_focus(cfg->camera);
 
+    const uint8_t *src = data->data;
+
+    /* Android's yuv420p is YV12 (V before U), which the rotation below
+     * swaps into I420. Convert NV21 to YV12 too, so it gets the same
+     * treatment. Not thread-safe either, like intermediate. */
+    if (cfg->nv21) {
+        static size_t last_yv12_size = 0;
+        static uint8_t *yv12 = NULL;
+
+        if ((size_t) (y_size + uv_size * 2) > last_yv12_size) {
+            free(yv12);
+            yv12 = malloc(y_size + uv_size * 2);
+            last_yv12_size = y_size + uv_size * 2;
+        }
+
+        NV21ToI420(data->data, cfg->width,
+                   (const uint8_t *) data->data + y_size, cfg->width,
+                   yv12, cfg->width,
+                   yv12 + y_size + uv_size, cfg->width / 2, /* U last */
+                   yv12 + y_size, cfg->width / 2,           /* V first */
+                   cfg->width, cfg->height);
+        src = yv12;
+    }
+
     /* Intermediate buffer ends up giving us a nice chance to rotate the image. */
-    rotate_yuv420p(data->data,                      /* Source Y */
-                   data->data + y_size,             /* Source U */
-                   data->data + y_size + uv_size,   /* Source V */
+    rotate_yuv420p(src,                             /* Source Y */
+                   src + y_size,                    /* Source U */
+                   src + y_size + uv_size,          /* Source V */
                    intermediate,                    /* Destination Y */
                    intermediate + y_size + uv_size, /* Destination U (swapped!) */
                    intermediate + y_size,           /* Destination V (swapped!) */
@@ -398,6 +425,20 @@ preview_frame_callback(void *userdata, DroidMediaData *data)
     written = write(cfg->v4l2_fd, intermediate, y_size + uv_size * 2);
     if (written < 0)
         g_warning("Error writing to v4l2 device: %s", strerror(errno));
+}
+
+/* Whether a comma-separated parameter list contains value. */
+static bool
+param_list_has(const char *list, const char *value)
+{
+    size_t len = strlen(value);
+
+    for (const char *p = list; p && *p; p = strchr(p, ',') ? strchr(p, ',') + 1 : NULL) {
+        if (strncmp(p, value, len) == 0 && (p[len] == ',' || p[len] == '\0'))
+            return true;
+    }
+
+    return false;
 }
 
 camera_config*
@@ -473,8 +514,16 @@ init_camera(int index, int desired_width, int desired_height)
         return NULL;
     }
 
-    /* everything we get from droidmedia supports yuv420p. hardcoding this should be safe */
-    sprintf(parameter_buffer, "preview-size=%dx%d;preview-frame-rate=30;preview-format=yuv420p;", width, height);
+    /* Old Qualcomm HALs offer only yuv420sp (NV21); asking them for
+     * yuv420p makes set_parameters() fail. */
+    bool nv21 = false;
+    if (droid_media_camera_get_parameter_value(camera, "preview-format-values", parameter_buffer, sizeof(parameter_buffer), NULL)
+        && !param_list_has(parameter_buffer, "yuv420p")
+        && param_list_has(parameter_buffer, "yuv420sp"))
+        nv21 = true;
+
+    sprintf(parameter_buffer, "preview-size=%dx%d;preview-frame-rate=30;preview-format=%s;",
+            width, height, nv21 ? "yuv420sp" : "yuv420p");
 
     /* OK, close the camera to give direct consumers a chance (and to let the camera HAL sleep)
      * It will be reopened on demand. */
@@ -504,6 +553,7 @@ init_camera(int index, int desired_width, int desired_height)
     conf->camera = NULL;
     conf->camera_idx = index;
     conf->parameters = strdup(parameter_buffer);
+    conf->nv21 = nv21;
 
     return conf;
 }
