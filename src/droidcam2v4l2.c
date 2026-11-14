@@ -522,8 +522,15 @@ init_camera(int index, int desired_width, int desired_height)
         && param_list_has(parameter_buffer, "yuv420sp"))
         nv21 = true;
 
-    sprintf(parameter_buffer, "preview-size=%dx%d;preview-frame-rate=30;preview-format=%s;",
-            width, height, nv21 ? "yuv420sp" : "yuv420p");
+    /* Prefer 30 fps, else the first rate the camera offers. */
+    int frame_rate = 30;
+    if (droid_media_camera_get_parameter_value(camera, "preview-frame-rate-values", parameter_buffer, sizeof(parameter_buffer), NULL)
+        && !param_list_has(parameter_buffer, "30")
+        && atoi(parameter_buffer) > 0)
+        frame_rate = atoi(parameter_buffer);
+
+    snprintf(parameter_buffer, sizeof(parameter_buffer), "preview-size=%dx%d;preview-frame-rate=%d;preview-format=%s;",
+            width, height, frame_rate, nv21 ? "yuv420sp" : "yuv420p");
 
     /* OK, close the camera to give direct consumers a chance (and to let the camera HAL sleep)
      * It will be reopened on demand. */
