@@ -717,6 +717,44 @@ wait_for_v4l2loopback_dev(void)
     }
 }
 
+/* The init service that brings up the camera HAL is named per vendor.
+ * $DROIDCAM2V4L2_SERVICE overrides the list. */
+static const char * const camera_services[] = {
+    "camerahalserver",
+    "vendor.camera-provider-2-4",
+    "camera-provider-2-4",
+    "camera_service",
+    NULL,
+};
+
+static bool
+service_running(const char *service, char *state)
+{
+    char key[128]; /* PROP_NAME_MAX (32) is too short for vendor.* names */
+
+    snprintf(key, sizeof(key), "init.svc.%s", service);
+    property_get(key, state, "");
+    return strcmp(state, "running") == 0;
+}
+
+static bool
+camera_service_running(char *state)
+{
+    const char *forced = getenv("DROIDCAM2V4L2_SERVICE");
+
+    if (forced && *forced)
+        return service_running(forced, state);
+
+    for (int i = 0; camera_services[i]; i++) {
+        if (service_running(camera_services[i], state)) {
+            g_debug("%s is running", camera_services[i]);
+            return true;
+        }
+    }
+
+    return false;
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -725,15 +763,8 @@ main(int argc, char *argv[])
     int desired_camera;
     char service_state[PROP_VALUE_MAX];
 
-    while (1) {
-        g_debug("waiting for camerahalserver to start...");
-        property_get("init.svc.camerahalserver", service_state, "");
-
-        if (strcmp(service_state, "running") == 0) {
-            g_debug("camerahalserver is running");
-            break;
-        }
-
+    while (!camera_service_running(service_state)) {
+        g_debug("waiting for a camera service to start...");
         sleep(5);
     }
 
