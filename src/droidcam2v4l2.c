@@ -246,30 +246,36 @@ droid_media_camera_get_parameter_value(DroidMediaCamera *camera, const char *par
 {
     char *original_params, *handle;
 
+    /* droid_media_camera_get_parameters() returns a malloc()ed copy. */
     if (params)
         original_params = strdup(params);
     else
-        original_params = strdup(droid_media_camera_get_parameters(camera));
+        original_params = droid_media_camera_get_parameters(camera);
 
     handle = original_params;
 
     while (original_params && *original_params) {
-        const char *key = original_params;
-        char *value = strchr(original_params, '=');
-        *value = '\0';
-        value++;
-        char *next = strchr(value, ';');
+        char *key = original_params;
+        char *next = strchr(original_params, ';');
         if (next) {
             *next = '\0';
             next++;
         }
         original_params = next;
 
+        char *value = strchr(key, '=');
+        if (!value)
+            continue;
+        *value = '\0';
+        value++;
+
         if (strcmp(key, parameter_name) == 0) {
+            size_t len = strlen(value);
+
             if (value_out && value_len)
-                strncpy(value_out, value, value_len);
+                g_strlcpy(value_out, value, value_len);
             free(handle);
-            return strlen(value);
+            return len;
         }
     }
 
@@ -280,25 +286,30 @@ droid_media_camera_get_parameter_value(DroidMediaCamera *camera, const char *par
 bool
 droid_media_camera_add_parameters(DroidMediaCamera *camera, const char *params)
 {
-    char *original_params = strdup(droid_media_camera_get_parameters(camera));
+    char *original_params = droid_media_camera_get_parameters(camera);
     char *handle = original_params;
+
+    if (!original_params)
+        return false;
 
     size_t final_buffer_size = strlen(original_params) + strlen(params) + 1;
     char *final_params = malloc(final_buffer_size);
     *final_params = '\0';
 
     while (original_params && *original_params) {
-        const char *key = original_params;
-        char *value = strchr(original_params, '=');
-        *value = '\0';
-        value++;
-
-        char *next = strchr(value, ';');
+        char *key = original_params;
+        char *next = strchr(original_params, ';');
         if (next) {
             *next = '\0';
             next++;
         }
         original_params = next;
+
+        char *value = strchr(key, '=');
+        if (!value)
+            continue;
+        *value = '\0';
+        value++;
 
         strcat(final_params, key);
         strcat(final_params, "=");
