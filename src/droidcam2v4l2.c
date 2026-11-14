@@ -335,11 +335,9 @@ rotate_yuv420p(const void *src_y, const void *src_u, const void *src_v, void *ds
 {
     enum RotationMode mode;
     int dst_width = src_width;
-    int dst_height = src_height;
     switch (rotation) {
         case 90:
             dst_width = src_height;
-            dst_height = src_width;
             mode = kRotate90;
             break;
         case 180:
@@ -347,7 +345,6 @@ rotate_yuv420p(const void *src_y, const void *src_u, const void *src_v, void *ds
             break;
         case 270:
             dst_width = src_height;
-            dst_height = src_width;
             mode = kRotate270;
             break;
         default:
@@ -361,7 +358,7 @@ rotate_yuv420p(const void *src_y, const void *src_u, const void *src_v, void *ds
                (uint8_t *)dst_y, dst_width,
                (uint8_t *)dst_u, dst_width / 2,
                (uint8_t *)dst_v, dst_width / 2,
-               dst_height, dst_width, mode);
+               src_width, src_height, mode);
 }
 
 void
